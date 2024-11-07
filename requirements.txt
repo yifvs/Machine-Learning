@@ -7,4 +7,4 @@ scipy
 scikit-learn
 statsmodels
 openpyxl
-pywt
+PyWavelets
