@@ -657,9 +657,7 @@ st.sidebar.markdown("""
 ---
         
 ### 版权声明
-        
-Copyright © 2024 海航航空技术有限公司. All Rights Reserved.  
-                            
+                                     
 本应用程序受著作权法和其他知识产权法保护。  
 未经授权，禁止复制、修改或分发本程序的任何部分。
                     
