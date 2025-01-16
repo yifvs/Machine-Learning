@@ -3,7 +3,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 import plotly.figure_factory as ff
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, PolynomialFeatures
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, PolynomialFeatures, RobustScaler, MaxAbsScaler, Normalizer
 from sklearn.linear_model import LinearRegression, SGDRegressor
 from sklearn.metrics import mean_squared_error
 import statsmodels.api as sm
@@ -28,6 +28,10 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
 import shap
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用于正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用于正常显示负号
 
 def evaluate_model(y_true, y_pred):
     """
@@ -93,43 +97,66 @@ class GRUModel(nn.Module):
         gru_out, _ = self.gru(x)
         predictions = self.fc(gru_out[:, -1, :])
         return predictions
-
+    
 def shap_analysis(model, X_train, X_test, feature_columns):
     """
     使用 SHAP 值分析模型的预测结果
     """
-    # 计算 SHAP 值
-    explainer = shap.Explainer(model, X_train)
-    shap_values = explainer(X_test)
+    # 根据模型类型选择解释器
+    if isinstance(model, (xgb.XGBModel, RandomForestRegressor, lgb.LGBMModel)):
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_test)
+    elif isinstance(model, torch.nn.Module):
+        explainer = shap.DeepExplainer(model, torch.tensor(X_train, dtype=torch.float32))
+        shap_values = explainer.shap_values(torch.tensor(X_test, dtype=torch.float32))
+    elif isinstance(model, SVR):
+        explainer = shap.LinearExplainer(model, X_train)
+        shap_values = explainer.shap_values(X_test)
+    else:
+        explainer = shap.Explainer(model, X_train)
+        shap_values = explainer(X_test)
+
 
     # 可视化全局特征重要性图
     st.subheader("全局特征重要性")
-    shap.summary_plot(shap_values, X_test, plot_type="bar", feature_names=feature_columns)
-    st.pyplot(bbox_inches='tight')
-    plt.clf()
+    shap_values_summary = np.mean(np.abs(shap_values), axis=0)
+    importance_df = pd.DataFrame({
+        'feature': feature_columns,
+        'importance': shap_values_summary
+    }).sort_values(by='importance', ascending=False)
 
-    # 可视化单样本贡献力图
-    st.subheader("单样本贡献力图")
-    sample_index = st.number_input("选择样本索引", min_value=0, max_value=len(X_test)-1, value=0)
-    shap.waterfall_plot(shap_values[sample_index], feature_names=feature_columns)
-    st.pyplot(bbox_inches='tight')
-    plt.clf()
+    fig = px.bar(importance_df, x='importance', y='feature', orientation='h', title='全局特征重要性')
+    st.plotly_chart(fig)
+def display_metrics(train_metrics, test_metrics):
+    """
+    显示训练集和测试集的评估指标
+    """
+    # 格式化准确率显示
+    train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
+    test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
 
-    # 可视化依赖图
-    st.subheader("特征依赖图")
-    feature = st.selectbox("选择特征", feature_columns)
-    shap.dependence_plot(feature, shap_values.values, X_test, feature_names=feature_columns)
-    st.pyplot(bbox_inches='tight')
-    plt.clf()
-    
+    # 显示评估指标
+    st.write(f"""
+    ## 模型评估指标
+    ### 训练集
+    - RMSE: {train_metrics['RMSE']:.4f}
+    - MAE: {train_metrics['MAE']:.4f}
+    - R²: {train_metrics['R²']:.4f}
+    - MSE: {train_metrics['MSE']:.4f}
+    - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
+
+    ### 测试集  
+    - RMSE: {test_metrics['RMSE']:.4f}
+    - MAE: {test_metrics['MAE']:.4f}
+    - R²: {test_metrics['R²']:.4f}
+    - MSE: {test_metrics['MSE']:.4f}
+    - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
+    """)
+
 # 设置页面布局
 st.set_page_config(layout="wide", page_title="Machine Learning", page_icon="📈")
 # 设置应用标题
-st.title("数据预处理与模型训练 Web 应用 V2.6")
-
-# 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 用于正常显示中文标签
-plt.rcParams['axes.unicode_minus'] = False  # 用于正常显示负号
+st.title("数据预处理与模型训练 Web 应用 V2.7")
 
 # 创建一个输入框来获取header的值
 header = st.sidebar.text_input("请输入数据表中列名所在的行号：:violet[(手动译码数据为0，自动译码数据为4)]", "4")
@@ -384,12 +411,21 @@ if uploaded_files is not None and len(uploaded_files) > 0:
             st.write("空值处理后的数据预览：", data[columns].head(10))
 
             # 归一化
-            normalization = st.selectbox("选择归一化方法", ["不进行归一化", "最小-最大归一化", "Z-score标准化"])
+            normalization = st.selectbox("选择归一化方法", ["不进行归一化", "最小-最大归一化", "Z-score标准化", "最大绝对值归一化", "Robust Scaler", "L2归一化"])
             if normalization == "最小-最大归一化":
                 scaler = MinMaxScaler()
                 data[columns] = scaler.fit_transform(data[columns])
             elif normalization == "Z-score标准化":
                 scaler = StandardScaler()
+                data[columns] = scaler.fit_transform(data[columns])
+            elif normalization == "最大绝对值归一化":
+                scaler = MaxAbsScaler()
+                data[columns] = scaler.fit_transform(data[columns])
+            elif normalization == "Robust Scaler":
+                scaler = RobustScaler()
+                data[columns] = scaler.fit_transform(data[columns])
+            elif normalization == "L2归一化":
+                scaler = Normalizer(norm='l2')
                 data[columns] = scaler.fit_transform(data[columns])
             st.write("归一化后的数据预览：", data[columns].head(10))
 
@@ -1345,27 +1381,8 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                             train_metrics = evaluate_model(y_train, y_train_pred)
                             test_metrics = evaluate_model(y_test, y_test_pred)
 
-                            # 格式化准确率显示
-                            train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                            test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                            # 显示评估指标
-                            st.write(f"""
-                            ## 模型评估指标
-                            ### 训练集
-                            - RMSE: {train_metrics['RMSE']:.4f}
-                            - MAE: {train_metrics['MAE']:.4f}
-                            - R²: {train_metrics['R²']:.4f}
-                            - MSE: {train_metrics['MSE']:.4f}
-                            - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                            ### 测试集  
-                            - RMSE: {test_metrics['RMSE']:.4f}
-                            - MAE: {test_metrics['MAE']:.4f}
-                            - R²: {test_metrics['R²']:.4f}
-                            - MSE: {test_metrics['MSE']:.4f}
-                            - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                            """)
+                            # 调用 display_metrics 函数显示评估指标
+                            display_metrics(train_metrics, test_metrics)
 
                     elif model_choice == "GRU":
                         # 数据标准化
@@ -1430,7 +1447,6 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         st.plotly_chart(fig_loss, use_container_width=True)
                         status_text.text('训练完成')
                         progress_bar.empty()
-                        st.write('')
 
                         # 生成预测值
                         model.eval()
@@ -1480,27 +1496,8 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                             train_metrics = evaluate_model(y_train, y_train_pred)
                             test_metrics = evaluate_model(y_test, y_test_pred)
 
-                            # 格式化准确率显示
-                            train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                            test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                            # 显示评估指标
-                            st.write(f"""
-                            ## 模型评估指标
-                            ### 训练集
-                            - RMSE: {train_metrics['RMSE']:.4f}
-                            - MAE: {train_metrics['MAE']:.4f}
-                            - R²: {train_metrics['R²']:.4f}
-                            - MSE: {train_metrics['MSE']:.4f}
-                            - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                            ### 测试集  
-                            - RMSE: {test_metrics['RMSE']:.4f}
-                            - MAE: {test_metrics['MAE']:.4f}
-                            - R²: {test_metrics['R²']:.4f}
-                            - MSE: {test_metrics['MSE']:.4f}
-                            - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                            """)
+                            # 调用 display_metrics 函数显示评估指标
+                            display_metrics(train_metrics, test_metrics)                
 
                     elif model_choice == "XGBoost":
                         import xgboost as xgb
@@ -1516,32 +1513,14 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         model.fit(X_train, y_train)
                         y_train_pred = pd.Series(model.predict(X_train), index=train_index)
                         y_test_pred = pd.Series(model.predict(X_test), index=test_index)
-
+                        
+                        shap_analysis(model, X_train, X_test, feature_columns)
                         # 使用统一评估函数计算指标
                         train_metrics = evaluate_model(y_train, y_train_pred)
                         test_metrics = evaluate_model(y_test, y_test_pred)
 
-                        # 格式化准确率显示
-                        train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                        test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                        # 显示评估指标
-                        st.write(f"""
-                        ## 模型评估指标
-                        ### 训练集
-                        - RMSE: {train_metrics['RMSE']:.4f}
-                        - MAE: {train_metrics['MAE']:.4f}
-                        - R²: {train_metrics['R²']:.4f}
-                        - MSE: {train_metrics['MSE']:.4f}
-                        - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                        ### 测试集
-                        - RMSE: {test_metrics['RMSE']:.4f}
-                        - MAE: {test_metrics['MAE']:.4f}
-                        - R²: {test_metrics['R²']:.4f}
-                        - MSE: {test_metrics['MSE']:.4f}
-                        - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                        """)
+                        # 调用 display_metrics 函数显示评估指标
+                        display_metrics(train_metrics, test_metrics)
                         
                         # 生成未来预测
                         future_X = generate_future_features(X, future_dates, feature_columns)
@@ -1559,31 +1538,13 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         y_train_pred = pd.Series(model.predict(X_train), index=train_index)
                         y_test_pred = pd.Series(model.predict(X_test), index=test_index)
 
+                        shap_analysis(model, X_train, X_test, feature_columns)
                         # 使用统一评估函数计算指标
                         train_metrics = evaluate_model(y_train, y_train_pred)
                         test_metrics = evaluate_model(y_test, y_test_pred)
 
-                        # 格式化准确率显示
-                        train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                        test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                        # 显示评估指标
-                        st.write(f"""
-                        ## 模型评估指标
-                        ### 训练集
-                        - RMSE: {train_metrics['RMSE']:.4f}
-                        - MAE: {train_metrics['MAE']:.4f}
-                        - R²: {train_metrics['R²']:.4f}
-                        - MSE: {train_metrics['MSE']:.4f}
-                        - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                        ### 测试集  
-                        - RMSE: {test_metrics['RMSE']:.4f}
-                        - MAE: {test_metrics['MAE']:.4f}
-                        - R²: {test_metrics['R²']:.4f}
-                        - MSE: {test_metrics['MSE']:.4f}
-                        - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                        """)
+                        # 调用 display_metrics 函数显示评估指标
+                        display_metrics(train_metrics, test_metrics)
                         
                         # 生成未来预测
                         future_X = generate_future_features(X, future_dates, feature_columns)
@@ -1603,31 +1564,13 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         y_train_pred = pd.Series(model.predict(X_train), index=train_index)
                         y_test_pred = pd.Series(model.predict(X_test), index=test_index)
 
+                        shap_analysis(model, X_train, X_test, feature_columns)
                         # 使用统一评估函数计算指标
                         train_metrics = evaluate_model(y_train, y_train_pred)
                         test_metrics = evaluate_model(y_test, y_test_pred)
 
-                        # 格式化准确率显示
-                        train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                        test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                        # 显示评估指标
-                        st.write(f"""
-                        ## 模型评估指标
-                        ### 训练集
-                        - RMSE: {train_metrics['RMSE']:.4f}
-                        - MAE: {train_metrics['MAE']:.4f}
-                        - R²: {train_metrics['R²']:.4f}
-                        - MSE: {train_metrics['MSE']:.4f}
-                        - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                        ### 测试集  
-                        - RMSE: {test_metrics['RMSE']:.4f}
-                        - MAE: {test_metrics['MAE']:.4f}
-                        - R²: {test_metrics['R²']:.4f}
-                        - MSE: {test_metrics['MSE']:.4f}
-                        - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                        """)
+                        # 调用 display_metrics 函数显示评估指标
+                        display_metrics(train_metrics, test_metrics)
                         
                         # 生成未来预测
                         future_X = generate_future_features(X, future_dates, feature_columns)
@@ -1638,7 +1581,8 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         model.fit(X_train, y_train)
                         y_train_pred = pd.Series(model.predict(X_train), index=train_index)
                         y_test_pred = pd.Series(model.predict(X_test), index=test_index)
-                        shap_analysis(model, X_train, X_test, feature_columns)
+
+                        shap_analysis(model, X_train, X_test, feature_columns)                       
                         # 生成未来预测
                         future_X = generate_future_features(X, future_dates, feature_columns)
                         future_pred = pd.Series(model.predict(future_X), index=future_dates)
@@ -1647,27 +1591,8 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         train_metrics = evaluate_model(y_train, y_train_pred)
                         test_metrics = evaluate_model(y_test, y_test_pred)
 
-                        # 格式化准确率显示
-                        train_acc = train_metrics['Accuracy'] if train_metrics['Accuracy'] is not None else 'N/A'
-                        test_acc = test_metrics['Accuracy'] if test_metrics['Accuracy'] is not None else 'N/A'
-
-                        # 显示评估指标
-                        st.write(f"""
-                        ## 模型评估指标
-                        ### 训练集
-                        - RMSE: {train_metrics['RMSE']:.4f}
-                        - MAE: {train_metrics['MAE']:.4f}
-                        - R²: {train_metrics['R²']:.4f}
-                        - MSE: {train_metrics['MSE']:.4f}
-                        - 准确率: {train_acc if isinstance(train_acc, str) else f"{train_acc:.2%}"}
-
-                        ### 测试集  
-                        - RMSE: {test_metrics['RMSE']:.4f}
-                        - MAE: {test_metrics['MAE']:.4f}
-                        - R²: {test_metrics['R²']:.4f}
-                        - MSE: {test_metrics['MSE']:.4f}
-                        - 准确率: {test_acc if isinstance(test_acc, str) else f"{test_acc:.2%}"}
-                        """)
+                        # 调用 display_metrics 函数显示评估指标
+                        display_metrics(train_metrics, test_metrics)
         
                     # 创建单个图表替代原来的三个子图
                     fig = go.Figure()
@@ -1816,7 +1741,8 @@ with st.sidebar.expander("版本记录", expanded=True, icon="🚨"):
     **2.3** 改版内容：添加统一的模型评估函数使所有模型（LSTM/XGBoost/RandomForest/LightGBM/SVR）都有相同的评估指标。  
     **2.4** 改版内容：增加主成分分析（PCA），优化相关性热图显示。   
     **2.5** 改版内容：增加LSTM模型训练过程中的训练损失曲线显示。   
-    **2.6** 改版内容：增加GRU模型训练算法。   
+    **2.6** 改版内容：增加GRU模型训练算法和归一化方法（最大绝对值归一化、Robust Scaler和L2归一化）。   
+    **2.7** 改版内容：增加SHAP值分析功能，优化评估指标显示。   
     """)
         
 st.sidebar.markdown("---")
@@ -1837,7 +1763,7 @@ Copyright © 2025 王康业. All Rights Reserved.
 本应用程序受著作权法和其他知识产权法保护。  
 未经授权，禁止复制、修改或分发本程序的任何部分。
                     
-Version 2.6.0
+Version 2.7.0
 """)
         
 # 添加一些空行来确保版权信息在底部
