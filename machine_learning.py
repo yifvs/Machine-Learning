@@ -1638,7 +1638,7 @@ if uploaded_files is not None and len(uploaded_files) > 0:
                         model.fit(X_train, y_train)
                         y_train_pred = pd.Series(model.predict(X_train), index=train_index)
                         y_test_pred = pd.Series(model.predict(X_test), index=test_index)
-                        
+                        shap_analysis(model, X_train, X_test, feature_columns)
                         # 生成未来预测
                         future_X = generate_future_features(X, future_dates, feature_columns)
                         future_pred = pd.Series(model.predict(future_X), index=future_dates)
