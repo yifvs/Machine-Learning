@@ -27,6 +27,7 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, a
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR
+import shap
 
 def evaluate_model(y_true, y_pred):
     """
@@ -93,6 +94,34 @@ class GRUModel(nn.Module):
         predictions = self.fc(gru_out[:, -1, :])
         return predictions
 
+def shap_analysis(model, X_train, X_test, feature_columns):
+    """
+    使用 SHAP 值分析模型的预测结果
+    """
+    # 计算 SHAP 值
+    explainer = shap.Explainer(model, X_train)
+    shap_values = explainer(X_test)
+
+    # 可视化全局特征重要性图
+    st.subheader("全局特征重要性")
+    shap.summary_plot(shap_values, X_test, plot_type="bar", feature_names=feature_columns)
+    st.pyplot(bbox_inches='tight')
+    plt.clf()
+
+    # 可视化单样本贡献力图
+    st.subheader("单样本贡献力图")
+    sample_index = st.number_input("选择样本索引", min_value=0, max_value=len(X_test)-1, value=0)
+    shap.waterfall_plot(shap_values[sample_index], feature_names=feature_columns)
+    st.pyplot(bbox_inches='tight')
+    plt.clf()
+
+    # 可视化依赖图
+    st.subheader("特征依赖图")
+    feature = st.selectbox("选择特征", feature_columns)
+    shap.dependence_plot(feature, shap_values.values, X_test, feature_names=feature_columns)
+    st.pyplot(bbox_inches='tight')
+    plt.clf()
+    
 # 设置页面布局
 st.set_page_config(layout="wide", page_title="Machine Learning", page_icon="📈")
 # 设置应用标题
